@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Defend Your Dome — Solarpunk Draft</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { height:100%; background:#0e2018; color:#eaf6ee; font-family:'Segoe UI', system-ui, sans-serif; overflow:hidden; }
+  #wrap { display:flex; flex-direction:column; align-items:center; height:100%; }
+  #hud { width:100%; max-width:1100px; display:flex; gap:8px; padding:8px; flex-wrap:wrap; align-items:center; }
+  #hud .grow { flex:1; }
+  canvas { border-radius:10px; max-width:100%; touch-action:manipulation; box-shadow:0 4px 30px #0008; }
+  button { background:#1e4034; color:#eaf6ee; border:1px solid #3f7f62; border-radius:10px;
+           padding:10px 12px; font-size:13px; cursor:pointer; min-width:86px; text-align:center; }
+  button:hover:not(:disabled) { background:#2a5a48; }
+  button:disabled { opacity:.4; cursor:default; }
+  button .cost { display:block; font-size:11px; color:#ffd76a; }
+  #gold { font-size:18px; font-weight:700; color:#ffd76a; min-width:110px; }
+  #cannonRow { width:100%; max-width:1100px; display:flex; gap:8px; padding:0 8px 8px; align-items:center; }
+  #overlay { position:fixed; inset:0; background:rgba(8,18,13,.85); display:none;
+             flex-direction:column; align-items:center; justify-content:center; gap:16px; z-index:10; }
+  #overlay h1 { font-size:42px; }
+  .tag { font-size:11px; color:#9fd4b8; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="hud">
+    <div id="gold">☀ 0</div>
+    <button id="bGrunt"></button>
+    <button id="bArcher"></button>
+    <button id="bTank"></button>
+    <button id="bEcon"></button>
+    <div class="grow"></div>
+  </div>
+  <div id="cannonRow">
+    <span class="tag" id="cannonStatus">Solar Cannon:</span>
+    <button id="bBuild"></button>
+    <button id="bRange"></button>
+    <button id="bDamage"></button>
+  </div>
+  <canvas id="cv" width="1100" height="520"></canvas>
+</div>
+
+<div id="overlay">
+  <h1 id="ovTitle"></h1>
+  <p id="ovSub"></p>
+  <button onclick="location.reload()">Play again</button>
+</div>
+
+<script>
+'use strict';
+const W = 1100, H = 520, GROUND = 440;
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+
+// ---------- config ----------
+const UNITS = {
+  grunt:  { cost: 50,  hp: 100, dmg: 12, range: 26,  speed: 55, atkCd: 0.8, size: 1.0, reward: 30,  label: '⚔️ Warden' },
+  archer: { cost: 90,  hp: 60,  dmg: 15, range: 170, speed: 45, atkCd: 1.1, size: 0.9, reward: 55,  label: '🏹 Thornshot' },
+  tank:   { cost: 180, hp: 380, dmg: 22, range: 30,  speed: 30, atkCd: 1.3, size: 1.35, reward: 110, label: '🛡️ Oakguard' },
+};
+const ECON_COSTS = [150, 300, 600];         // sun-harvest upgrade costs
+const CANNON_BUILD_COST = 300;
+const CANNON_UPG_COSTS  = [250, 450, 700];  // 1st (forced range), 2nd, 3rd
+const CANNON_RANGES = [0.52, 0.78, 1.0];    // fraction of field reachable per range level (1..3)
+const CANNON_DMGS   = [70, 140, 230];       // damage per damage level (1..3)
+
+// palette
+const PAL = {
+  allySil: '#16343a', allyGlow: '#5cffc4',
+  foeSil:  '#301c1c', foeGlow:  '#ff8a4d',
+  shell:   '#ffe27a',
+};
+
+// ---------- state ----------
+const P = { hp: 1000, maxHp: 1000, gold: 120, income: 6, econLvl: 0, x: 60 };
+const E = { hp: 1000, maxHp: 1000, gold: 120, income: 6, x: W - 60 };
+const cannon = { built: false, upgrades: 0, rangeLvl: 0, dmgLvl: 0, cd: 0, fireRate: 3.2 };
+let units = [], shells = [], parts = [], texts = [], smoke = [];
+let over = false, time = 0;
+
+function spawn(side, type) {
+  const u = UNITS[type];
+  units.push({ side, type, hp: u.hp, maxHp: u.hp, x: side === 1 ? P.x + 40 : E.x - 40,
+               cd: 0, phase: Math.random() * 7 });
+}
+
+// ---------- player actions ----------
+const $ = id => document.getElementById(id);
+function tryBuy(cost, fn) { if (!over && P.gold >= cost) { P.gold -= cost; fn(); } }
+$('bGrunt').onclick  = () => tryBuy(UNITS.grunt.cost,  () => spawn(1, 'grunt'));
+$('bArcher').onclick = () => tryBuy(UNITS.archer.cost, () => spawn(1, 'archer'));
+$('bTank').onclick   = () => tryBuy(UNITS.tank.cost,   () => spawn(1, 'tank'));
+$('bEcon').onclick   = () => { if (P.econLvl < ECON_COSTS.length)
+  tryBuy(ECON_COSTS[P.econLvl], () => { P.econLvl++; P.income += 4; }); };
+$('bBuild').onclick  = () => tryBuy(CANNON_BUILD_COST, () => {
+  cannon.built = true; cannon.rangeLvl = 1; cannon.dmgLvl = 1; });
+$('bRange').onclick  = () => upgradeCannon('range');
+$('bDamage').onclick = () => upgradeCannon('dmg');
+
+function upgradeCannon(kind) {
+  if (!cannon.built || cannon.upgrades >= 3) return;
+  if (cannon.upgrades === 0 && kind !== 'range') return;   // first upgrade must be range
+  if (kind === 'range' && cannon.rangeLvl >= 3) return;
+  if (kind === 'dmg'   && cannon.dmgLvl   >= 3) return;
+  tryBuy(CANNON_UPG_COSTS[cannon.upgrades], () => {
+    if (kind === 'range') cannon.rangeLvl++; else cannon.dmgLvl++;
+    cannon.upgrades++;
+  });
+}
+
+// ---------- enemy AI ----------
+let aiTimer = 1.5, aiWave = 0;
+function aiThink(dt) {
+  E.gold += E.income * dt * (1 + time / 240);  // enemy economy scales slowly
+  aiTimer -= dt;
+  if (aiTimer > 0) return;
+  const pick = ['grunt','grunt','archer','grunt','tank'][aiWave % 5];
+  if (E.gold >= UNITS[pick].cost) {
+    E.gold -= UNITS[pick].cost;
+    spawn(-1, pick);
+    aiWave++;
+    aiTimer = Math.max(1.6, 4.5 - time / 60);  // spawns speed up over time
+  } else aiTimer = 0.5;
+}
+
+// ---------- cannon ----------
+function cannonRangeX() { return P.x + (E.x - P.x) * CANNON_RANGES[cannon.rangeLvl - 1]; }
+function cannonDmg()    { return CANNON_DMGS[cannon.dmgLvl - 1]; }
+function cannonTick(dt) {
+  if (!cannon.built) return;
+  cannon.cd -= dt;
+  if (cannon.cd > 0) return;
+  const maxX = cannonRangeX();
+  // furthest enemy troop in range; if none and base reachable, shell the base
+  let target = null;
+  for (const u of units) if (u.side === -1 && u.x <= maxX && (!target || u.x > target.x)) target = u;
+  let tx = null;
+  if (target) tx = target.x;
+  else if (maxX >= E.x - 30) tx = E.x;
+  if (tx === null) return;
+  cannon.cd = cannon.fireRate;
+  shells.push({ x: P.x, y: 120, tx, t: 0, dur: 0.9 });
+}
+function shellTick(dt) {
+  for (const s of shells) {
+    s.t += dt;
+    if (s.t >= s.dur) {
+      s.dead = true;
+      boom(s.tx, GROUND);
+      const dmg = cannonDmg();
+      for (const u of units) if (u.side === -1 && Math.abs(u.x - s.tx) < 55) hit(u, dmg);
+      if (Math.abs(E.x - s.tx) < 60) { E.hp -= dmg; floatText(E.x, GROUND - 130, '-' + dmg, '#ff8a4d'); }
+    }
+  }
+  shells = shells.filter(s => !s.dead);
+}
+
+// ---------- combat ----------
+function hit(u, dmg) {
+  u.hp -= dmg;
+  if (u.hp <= 0 && !u.dead) {
+    u.dead = true;
+    boom(u.x, GROUND - 18, 6);
+    if (u.side === -1) { P.gold += UNITS[u.type].reward; floatText(u.x, GROUND - 44, '+' + UNITS[u.type].reward, '#ffd76a'); }
+  }
+}
+function unitTick(dt) {
+  for (const u of units) {
+    const cfg = UNITS[u.type];
+    u.cd -= dt;
+    // nearest opposing unit ahead
+    let foe = null, foeD = 1e9;
+    for (const v of units) {
+      if (v.side === u.side || v.dead) continue;
+      const d = (v.x - u.x) * u.side;
+      if (d >= -5 && d < foeD) { foeD = d; foe = v; }
+    }
+    const baseX = u.side === 1 ? E.x : P.x;
+    const baseD = (baseX - u.x) * u.side - 30;
+    if (foe && foeD <= cfg.range) {
+      if (u.cd <= 0) { u.cd = cfg.atkCd; hit(foe, cfg.dmg); }
+    } else if (baseD <= cfg.range) {
+      if (u.cd <= 0) {
+        u.cd = cfg.atkCd;
+        if (u.side === 1) E.hp -= cfg.dmg; else P.hp -= cfg.dmg;
+      }
+    } else {
+      // don't walk through friendly unit directly ahead
+      let block = false;
+      for (const v of units) {
+        if (v === u || v.side !== u.side || v.dead) continue;
+        const d = (v.x - u.x) * u.side;
+        if (d > 0 && d < 16 * cfg.size + 16 * UNITS[v.type].size) { block = true; break; }
+      }
+      if (!block) u.x += cfg.speed * u.side * dt;
+    }
+  }
+  units = units.filter(u => !u.dead);
+}
+
+// ---------- fx ----------
+function boom(x, y, n = 14) {
+  for (let i = 0; i < n; i++) parts.push({ x, y, vx: (Math.random()-.5)*260, vy: -Math.random()*220,
+    life: .5 + Math.random()*.3, color: Math.random() < .5 ? '#ffe27a' : '#ff9a52' });
+}
+function floatText(x, y, str, color) { texts.push({ x, y, str, color, life: 1 }); }
+function fxTick(dt) {
+  for (const p of parts) { p.life -= dt; p.x += p.vx*dt; p.y += p.vy*dt; p.vy += 500*dt; }
+  parts = parts.filter(p => p.life > 0);
+  for (const t of texts) { t.life -= dt; t.y -= 30*dt; }
+  texts = texts.filter(t => t.life > 0);
+  if (Math.random() < 0.12) smoke.push({ x: E.x + 18 + Math.random()*10, y: GROUND - 150,
+    r: 5 + Math.random()*4, vy: -22 - Math.random()*14, life: 3 });
+  for (const s of smoke) { s.life -= dt; s.y += s.vy*dt; s.x += 6*dt; s.r += 5*dt; }
+  smoke = smoke.filter(s => s.life > 0);
+}
+
+// ---------- background ----------
+function drawSky() {
+  // bright, dramatic golden-hour sky
+  const g = ctx.createLinearGradient(0, 0, 0, GROUND);
+  g.addColorStop(0, '#4fb6e8'); g.addColorStop(0.55, '#a9e3d0');
+  g.addColorStop(0.82, '#ffe9a8'); g.addColorStop(1, '#ffcf7d');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, GROUND);
+  // sun with rays
+  const sx = W * 0.42, sy = GROUND - 60;
+  const sg = ctx.createRadialGradient(sx, sy, 10, sx, sy, 190);
+  sg.addColorStop(0, '#fff6d8'); sg.addColorStop(0.25, '#ffe27acc'); sg.addColorStop(1, '#ffe27a00');
+  ctx.fillStyle = sg; ctx.beginPath(); ctx.arc(sx, sy, 190, 0, 7); ctx.fill();
+  ctx.save();
+  ctx.globalAlpha = 0.18 + 0.05 * Math.sin(time);
+  ctx.fillStyle = '#fff3c4';
+  for (let i = 0; i < 7; i++) {
+    ctx.save(); ctx.translate(sx, sy); ctx.rotate(-Math.PI * 0.15 - i * 0.13 + Math.sin(time * .3) * .02);
+    ctx.fillRect(60, -6, 520, 12); ctx.restore();
+  }
+  ctx.restore();
+  // drifting clouds
+  ctx.fillStyle = '#ffffff88';
+  for (let i = 0; i < 4; i++) {
+    const cx = ((time * (8 + i * 4) + i * 300) % (W + 240)) - 120;
+    const cy = 50 + i * 42;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, 62, 15, 0, 0, 7);
+    ctx.ellipse(cx + 34, cy - 9, 38, 13, 0, 0, 7);
+    ctx.fill();
+  }
+  // far hills with wind turbines
+  ctx.fillStyle = '#7fcf9a';
+  ctx.beginPath(); ctx.moveTo(0, GROUND);
+  for (let x = 0; x <= W; x += 20) ctx.lineTo(x, GROUND - 34 - 26 * Math.sin(x / 170 + 1.2));
+  ctx.lineTo(W, GROUND); ctx.fill();
+  for (const tx of [260, 620, 860]) {
+    const ty = GROUND - 44 - 26 * Math.sin(tx / 170 + 1.2);
+    ctx.strokeStyle = '#e9fbee'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(tx, ty - 42); ctx.stroke();
+    ctx.save(); ctx.translate(tx, ty - 42); ctx.rotate(time * 1.4 + tx);
+    for (let b = 0; b < 3; b++) { ctx.rotate(Math.PI * 2 / 3);
+      ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, -18); ctx.stroke(); }
+    ctx.restore();
+  }
+}
+function drawGround() {
+  const g = ctx.createLinearGradient(0, GROUND, 0, H);
+  g.addColorStop(0, '#63b556'); g.addColorStop(1, '#33753c');
+  ctx.fillStyle = g; ctx.fillRect(0, GROUND, W, H - GROUND);
+  // meadow flowers (deterministic scatter)
+  for (let i = 0; i < 46; i++) {
+    const fx = (i * 137.5) % W, fy = GROUND + 12 + ((i * 71) % (H - GROUND - 20));
+    ctx.fillStyle = ['#ffe27a', '#ff9ecb', '#ffffff', '#8affd9'][i % 4];
+    ctx.fillRect(fx, fy, 3, 3);
+  }
+}
+
+// ---------- bases ----------
+function drawPlayerBase() {
+  const x = P.x;
+  // living tower: earthen walls with planter terraces
+  ctx.fillStyle = '#8a6f4d'; ctx.fillRect(x - 45, GROUND - 110, 90, 110);
+  ctx.fillStyle = '#5da24f';
+  for (let i = 0; i < 3; i++) ctx.fillRect(x - 45, GROUND - 100 + i * 34, 90, 7);   // vine terraces
+  // glass dome with glow
+  ctx.save();
+  ctx.shadowColor = PAL.allyGlow; ctx.shadowBlur = 18;
+  ctx.fillStyle = '#bfeee0aa';
+  ctx.beginPath(); ctx.arc(x, GROUND - 110, 45, Math.PI, 0); ctx.fill();
+  ctx.restore();
+  ctx.strokeStyle = '#ffffffcc'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(x, GROUND - 110, 45, Math.PI, 0); ctx.stroke();
+  ctx.beginPath(); ctx.arc(x, GROUND - 110, 28, Math.PI, 0); ctx.stroke();
+  // tree inside the dome
+  ctx.strokeStyle = '#4b3a26'; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(x, GROUND - 112); ctx.lineTo(x, GROUND - 136); ctx.stroke();
+  ctx.fillStyle = '#48a860';
+  ctx.beginPath(); ctx.arc(x, GROUND - 142, 13, 0, 7); ctx.fill();
+  // solar cannon: mirrored dish + barrel of light
+  if (cannon.built) {
+    ctx.save(); ctx.translate(x, GROUND - 158);
+    ctx.fillStyle = '#2d4a44';
+    ctx.beginPath(); ctx.arc(0, 0, 12, 0, 7); ctx.fill();
+    ctx.rotate(-Math.PI / 4);
+    const len = 44 + cannon.dmgLvl * 6;
+    ctx.fillStyle = '#e8b64c'; ctx.fillRect(0, -6, len, 12);
+    ctx.shadowColor = PAL.shell; ctx.shadowBlur = 14;
+    ctx.fillStyle = '#fff3c4'; ctx.fillRect(len - 6, -6, 6, 12);   // glowing muzzle
+    ctx.restore();
+    // solar collector panels feeding the cannon
+    ctx.fillStyle = '#2f6f8f';
+    ctx.fillRect(x - 44, GROUND - 122, 16, 10); ctx.fillRect(x + 28, GROUND - 122, 16, 10);
+  }
+  hpBar(x, P);
+}
+function drawEnemyBase() {
+  const x = E.x;
+  // smog rig: dark metal blockhouse with stacks
+  ctx.fillStyle = '#3a3440'; ctx.fillRect(x - 45, GROUND - 110, 90, 110);
+  ctx.fillStyle = '#2b2630';
+  ctx.fillRect(x - 45, GROUND - 130, 90, 20);
+  ctx.fillRect(x + 8, GROUND - 168, 18, 40);    // smokestack
+  ctx.fillRect(x - 26, GROUND - 152, 14, 24);   // smokestack
+  ctx.save(); ctx.shadowColor = PAL.foeGlow; ctx.shadowBlur = 10;
+  ctx.fillStyle = PAL.foeGlow;
+  for (let i = 0; i < 3; i++) ctx.fillRect(x - 32 + i * 26, GROUND - 90, 12, 8);   // furnace windows
+  ctx.restore();
+  ctx.fillStyle = '#55505e';
+  for (let i = 0; i < 4; i++) ctx.fillRect(x - 45 + i * 24, GROUND - 44, 16, 6);
+  hpBar(x, E);
+}
+function hpBar(x, b) {
+  ctx.fillStyle = '#0007'; ctx.fillRect(x - 45, GROUND - 186, 90, 9);
+  ctx.fillStyle = b === P ? PAL.allyGlow : PAL.foeGlow;
+  ctx.fillRect(x - 45, GROUND - 186, 90 * Math.max(0, b.hp) / b.maxHp, 9);
+}
+
+// ---------- silhouette troops ----------
+function drawUnit(u) {
+  const cfg = UNITS[u.type];
+  const s = cfg.size, dir = u.side;
+  const sil = u.side === 1 ? PAL.allySil : PAL.foeSil;
+  const glow = u.side === 1 ? PAL.allyGlow : PAL.foeGlow;
+  const bob = Math.sin(time * 9 + u.phase) * 1.6;
+  const x = u.x, y = GROUND + bob * 0.3;
+  ctx.save();
+  ctx.translate(x, y); ctx.scale(dir * s, s);
+  ctx.fillStyle = sil;
+  // legs (simple stride)
+  const st = Math.sin(time * 9 + u.phase) * 5;
+  ctx.beginPath(); ctx.moveTo(-2, -14); ctx.lineTo(-4 + st, 0); ctx.lineTo(-1 + st, 0); ctx.lineTo(1, -14); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(0, -14);  ctx.lineTo(2 - st, 0);  ctx.lineTo(5 - st, 0);  ctx.lineTo(3, -14); ctx.fill();
+  // torso + head
+  ctx.beginPath();
+  ctx.moveTo(-5, -14); ctx.quadraticCurveTo(-6, -26, -3, -28);
+  ctx.lineTo(5, -28); ctx.quadraticCurveTo(7, -22, 5, -14); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.arc(1, -32, 4.6, 0, 7); ctx.fill();
+  // gear per class (still silhouette)
+  if (u.type === 'grunt') {                       // Warden: leaf-blade
+    ctx.save(); ctx.translate(6, -24); ctx.rotate(u.cd > 0.4 ? -0.9 : -0.2);
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.quadraticCurveTo(10, -6, 15, -14);
+    ctx.quadraticCurveTo(8, -8, 0, -3); ctx.fill(); ctx.restore();
+  } else if (u.type === 'archer') {               // Thornshot: bow
+    ctx.strokeStyle = sil; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(8, -24, 9, -1.2, 1.2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(8 + 9*Math.cos(-1.2), -24 + 9*Math.sin(-1.2));
+    ctx.lineTo(8 + 9*Math.cos(1.2), -24 + 9*Math.sin(1.2)); ctx.stroke();
+  } else {                                        // Oakguard: bark shield
+    ctx.beginPath();
+    ctx.moveTo(7, -30); ctx.quadraticCurveTo(15, -24, 13, -10);
+    ctx.quadraticCurveTo(9, -6, 6, -10); ctx.closePath(); ctx.fill();
+  }
+  // glowing accents: visor + chest sigil
+  ctx.shadowColor = glow; ctx.shadowBlur = 8; ctx.fillStyle = glow;
+  ctx.fillRect(2.4, -33, 3.4, 1.6);              // visor
+  ctx.beginPath(); ctx.arc(0.5, -22, 1.6, 0, 7); ctx.fill();  // sigil
+  ctx.restore();
+  // hp bar
+  const bw = 26 * s;
+  ctx.fillStyle = '#0007'; ctx.fillRect(x - bw/2, GROUND - 44 * s, bw, 3.5);
+  ctx.fillStyle = glow;    ctx.fillRect(x - bw/2, GROUND - 44 * s, bw * u.hp / u.maxHp, 3.5);
+}
+
+// ---------- render ----------
+function render() {
+  ctx.clearRect(0, 0, W, H);
+  drawSky(); drawGround();
+  // cannon range marker
+  if (cannon.built) {
+    const rx = cannonRangeX();
+    ctx.strokeStyle = '#ffffff55'; ctx.setLineDash([6, 8]);
+    ctx.beginPath(); ctx.moveTo(rx, 70); ctx.lineTo(rx, GROUND); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#ffffff88'; ctx.font = '11px sans-serif';
+    ctx.fillText('cannon range', rx - 70, 84);
+  }
+  // enemy smog
+  for (const s of smoke) { ctx.globalAlpha = Math.min(.4, s.life * .18); ctx.fillStyle = '#4a4450';
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, 7); ctx.fill(); }
+  ctx.globalAlpha = 1;
+  drawPlayerBase(); drawEnemyBase();
+  for (const u of units) drawUnit(u);
+  // shells: glowing sun-orbs on an arc
+  for (const s of shells) {
+    const k = s.t / s.dur;
+    const x = s.x + (s.tx - s.x) * k;
+    const y = s.y + (GROUND - s.y) * k - Math.sin(k * Math.PI) * 160;
+    ctx.save(); ctx.shadowColor = PAL.shell; ctx.shadowBlur = 20;
+    ctx.fillStyle = '#fff6d8'; ctx.beginPath(); ctx.arc(x, y, 7, 0, 7); ctx.fill();
+    ctx.restore();
+  }
+  for (const p of parts) { ctx.globalAlpha = Math.max(0, p.life * 2); ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - 3, p.y - 3, 6, 6); }
+  ctx.globalAlpha = 1;
+  ctx.font = 'bold 15px sans-serif';
+  for (const t of texts) { ctx.globalAlpha = t.life; ctx.fillStyle = t.color; ctx.fillText(t.str, t.x - 12, t.y); }
+  ctx.globalAlpha = 1;
+}
+
+// ---------- hud ----------
+function btn(el, label, cost, enabled) {
+  el.innerHTML = label + (cost != null ? `<span class="cost">☀ ${cost}</span>` : '');
+  el.disabled = !enabled;
+}
+function hud() {
+  $('gold').textContent = '☀ ' + Math.floor(P.gold);
+  btn($('bGrunt'),  UNITS.grunt.label,  UNITS.grunt.cost,  P.gold >= UNITS.grunt.cost);
+  btn($('bArcher'), UNITS.archer.label, UNITS.archer.cost, P.gold >= UNITS.archer.cost);
+  btn($('bTank'),   UNITS.tank.label,   UNITS.tank.cost,   P.gold >= UNITS.tank.cost);
+  const eMax = P.econLvl >= ECON_COSTS.length;
+  btn($('bEcon'), eMax ? '🌻 Harvest MAX' : '🌻 Harvest +', eMax ? null : ECON_COSTS[P.econLvl],
+      !eMax && P.gold >= ECON_COSTS[P.econLvl]);
+  // cannon row
+  const st = $('cannonStatus');
+  if (!cannon.built) {
+    st.textContent = 'Solar Cannon: not built';
+    $('bBuild').style.display = ''; $('bRange').style.display = 'none'; $('bDamage').style.display = 'none';
+    btn($('bBuild'), '🔨 Build Cannon', CANNON_BUILD_COST, P.gold >= CANNON_BUILD_COST);
+  } else {
+    st.textContent = `Solar Cannon: Range ${cannon.rangeLvl}/3 · Damage ${cannon.dmgLvl}/3 · Upgrades ${cannon.upgrades}/3`;
+    $('bBuild').style.display = 'none';
+    const done = cannon.upgrades >= 3;
+    const cost = done ? null : CANNON_UPG_COSTS[cannon.upgrades];
+    const forceRange = cannon.upgrades === 0;
+    $('bRange').style.display = ''; $('bDamage').style.display = '';
+    btn($('bRange'), forceRange ? '📏 Range (required 1st)' : '📏 Range +',
+        cost, !done && cannon.rangeLvl < 3 && P.gold >= cost);
+    btn($('bDamage'), '💥 Damage +',
+        cost, !done && !forceRange && cannon.dmgLvl < 3 && P.gold >= cost);
+    if (done) { btn($('bRange'), '📏 Range ' + cannon.rangeLvl + '/3', null, false);
+                btn($('bDamage'), '💥 Damage ' + cannon.dmgLvl + '/3', null, false); }
+  }
+}
+
+// ---------- main loop ----------
+function end(win) {
+  over = true;
+  $('overlay').style.display = 'flex';
+  $('ovTitle').textContent = win ? '🌞 Victory!' : '🥀 Dome Overrun';
+  $('ovSub').textContent = win ? 'The smog rig falls — the meadow breathes again.'
+                               : 'The garden is ash. Replant and try again.';
+}
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  if (!over) {
+    time += dt;
+    P.gold += P.income * dt;
+    aiThink(dt);
+    unitTick(dt);
+    cannonTick(dt);
+    shellTick(dt);
+    fxTick(dt);
+    if (E.hp <= 0) end(true);
+    else if (P.hp <= 0) end(false);
+  }
+  render(); hud();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
