@@ -46,7 +46,7 @@
 <div id="overlay">
   <h1 id="ovTitle"></h1>
   <p id="ovSub"></p>
-  <button onclick="location.reload()">Play again</button>
+  <button id="bReplay">Play again</button>
 </div>
 
 <script>
@@ -459,6 +459,15 @@ function end(win) {
   $('ovSub').textContent = win ? 'The smog rig falls — the meadow breathes again.'
                                : 'The garden is ash. Replant and try again.';
 }
+function restart() {
+  Object.assign(P, { hp: 1000, maxHp: 1000, gold: 120, income: 6, econLvl: 0, x: 60 });
+  Object.assign(E, { hp: 1000, maxHp: 1000, gold: 120, income: 6, x: W - 60 });
+  Object.assign(cannon, { built: false, upgrades: 0, rangeLvl: 0, dmgLvl: 0, cd: 0, fireRate: 3.2 });
+  units = []; shells = []; parts = []; texts = []; smoke = [];
+  over = false; time = 0; aiTimer = 1.5; aiWave = 0;
+  $('overlay').style.display = 'none';
+}
+$('bReplay').onclick = restart;
 let last = performance.now();
 function loop(now) {
   const dt = Math.min(0.05, (now - last) / 1000); last = now;
