@@ -24,8 +24,10 @@ testing on your LAN: `python3 -m http.server` and visit `http://<your-ip>:8000`.
   reaches the enemy base. The basic shell is single-target until a Damage
   upgrade gives it splash.
 - **Cannon ammo (unlock with sunlight, then tap-to-fire on a cooldown):**
-  - 🌿 **Vine** (☀150) plants a trap that lingers **10 seconds** — anyone who
-    walks in gets rooted and thorned over time.
+  - 🌿 **Vine** (☀150) plants a trap patch that holds and thorns any enemy
+    standing in it; lasts **10 seconds**. Upgrade to **🌿⬆ Thornfield** (☀300)
+    and the patch instead persists until it has dealt a fixed **damage budget**
+    — so a shot that misses just waits on the field for its victims.
   - 💥 **Bomb** (☀250) huge splash damage.
   - 🕳 **Void** (☀200) a black hole dropped behind the pack that drags enemies
     back toward their own base.
