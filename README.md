@@ -13,13 +13,22 @@ testing on your LAN: `python3 -m http.server` and visit `http://<your-ip>:8000`.
 
 - **Sunlight (gold)** accrues over time; kills pay bounties.
 - **Troops:** Warden (cheap melee), Thornshot (ranged), Oakguard (slow tank).
-  Enemy AI spawns waves that speed up over time.
+  Friendly troops pass freely through each other, so melee can move ahead of
+  archers. Enemy AI spawns waves that speed up over time.
 - **Base economy:** three "Harvest" upgrades raise income.
 - **Solar Cannon:** build it first (reaches only mid-field — shreds troops but
   can't touch the enemy base). Then exactly 3 upgrades: the **first must be
   Range**; the second and third are your choice of Range or Damage. Max range
-  reaches the enemy base.
-- **Win** by destroying the smog rig; lose if your dome falls.
+  reaches the enemy base. The basic shell is single-target until a Damage
+  upgrade gives it splash.
+- **Cannon abilities (tap-to-fire, on cooldown, unlocked once the cannon is
+  built):** 🌿 **Vine** roots enemies and thorns them over time · 💥 **Bomb**
+  big splash damage · 🕳 **Void** a black hole that drags enemies back toward
+  their base.
+- **Enemy cannon:** the toxic rig fires back at your advancing troops, but at
+  this difficulty it can't reach your dome (a `DIFFICULTY` flag unlocks that for
+  future levels).
+- **Win** by destroying the toxic rig; lose if your dome falls.
 
 ## Aesthetic
 
